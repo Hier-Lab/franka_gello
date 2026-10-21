@@ -52,6 +52,13 @@ controller_interface::return_type JointImpedanceController::update(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
   updateJointStates_();
+  // The subscription callback cannot notice a publisher that stopped publishing, so the
+  // staleness of the last received Gello state has to be re-checked every cycle.
+  if (gello_position_values_valid_ &&
+      (this->get_node()->now() - last_joint_state_time_).seconds() >= kMaxJointStateAge) {
+    gello_position_values_valid_ = false;
+  }
+
   Vector7d q_goal;
   Vector7d tau_d_calculated;
 
@@ -185,6 +192,9 @@ CallbackReturn JointImpedanceController::on_configure(
 
 CallbackReturn JointImpedanceController::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
+  gello_position_values_valid_ = false;
+  motion_generator_initialized_ = false;
+  move_to_start_position_finished_ = false;
   last_joint_state_time_ = get_node()->now();
   dq_filtered_.setZero();
   start_time_ = this->get_node()->now();
@@ -217,12 +227,11 @@ bool JointImpedanceController::validateGains_(const std::vector<double>& gains,
 }
 
 void JointImpedanceController::validateGelloPositions_(const sensor_msgs::msg::JointState& msg) {
-  const double max_time_diff = 0.5;
   auto current_time = get_node()->now();
   auto time_since_last_joint_state = (current_time - last_joint_state_time_).seconds();
   auto time_since_msg_stamp = (current_time - msg.header.stamp).seconds();
   gello_position_values_valid_ =
-      (time_since_last_joint_state < max_time_diff && time_since_msg_stamp < max_time_diff);
+      (time_since_last_joint_state < kMaxJointStateAge && time_since_msg_stamp < kMaxJointStateAge);
   if (!gello_position_values_valid_) {
     RCLCPP_WARN(get_node()->get_logger(),
                 "Gello position values are not valid. Time since last joint state: %f // Time "

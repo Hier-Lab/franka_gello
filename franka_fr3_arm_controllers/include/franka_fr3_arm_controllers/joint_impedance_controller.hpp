@@ -60,6 +60,7 @@ class JointImpedanceController : public controller_interface::ControllerInterfac
   bool gello_position_values_valid_ = false;
   std::array<double, 7> gello_position_values_{0, 0, 0, 0, 0, 0, 0};
   rclcpp::Time last_joint_state_time_;
+  static constexpr double kMaxJointStateAge = 0.5;
 
   Vector7d calculateTauDGains_(const Vector7d& q_goal);
   bool validateGains_(const std::vector<double>& gains, const std::string& gains_name);
