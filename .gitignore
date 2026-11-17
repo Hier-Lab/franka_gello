@@ -1,0 +1,27 @@
+# Python byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# colcon / ROS 2 build artifacts (when built from this directory)
+build/
+install/
+log/
+
+# CMake / C++ build artifacts
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.so
+*.gcda
+*.gcno
+
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
