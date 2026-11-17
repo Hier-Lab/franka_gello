@@ -15,8 +15,12 @@
 #pragma once
 
 #include <Eigen/Eigen>
+#include <array>
+#include <atomic>
 #include <controller_interface/controller_interface.hpp>
+#include <cstdint>
 #include <rclcpp/rclcpp.hpp>
+#include <realtime_tools/realtime_buffer.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <string>
 #include "franka_fr3_arm_controllers/motion_generator.hpp"
@@ -40,6 +44,7 @@ class JointImpedanceController : public controller_interface::ControllerInterfac
   CallbackReturn on_init() override;
   CallbackReturn on_configure(const rclcpp_lifecycle::State& previous_state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
 
  private:
   std::string arm_id_;
@@ -57,16 +62,35 @@ class JointImpedanceController : public controller_interface::ControllerInterfac
   rclcpp::Time start_time_;
   std::unique_ptr<MotionGenerator> motion_generator_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscriber_ = nullptr;
+
+  // One Gello message as handed from the subscription callback (non-RT) to update() (RT).
+  // seq == 0 means "nothing received since activation"; the times are only meaningful then.
+  struct GelloSample {
+    std::array<double, 7> positions{0, 0, 0, 0, 0, 0, 0};
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};         // msg.header.stamp (publisher clock)
+    rclcpp::Time receive_time{0, 0, RCL_ROS_TIME};  // controller clock at reception
+    uint64_t seq{0};
+  };
+  realtime_tools::RealtimeBuffer<GelloSample> gello_buffer_;
+  std::atomic<bool> accepting_gello_messages_{false};
+  uint64_t gello_rx_seq_{0};  // only touched by the subscription callback
+
+  // RT-side state, only touched in update() / on_activate().
   bool gello_position_values_valid_ = false;
   std::array<double, 7> gello_position_values_{0, 0, 0, 0, 0, 0, 0};
-  rclcpp::Time last_joint_state_time_;
+  rclcpp::Time activation_time_{0, 0, RCL_ROS_TIME};
+  uint64_t last_seen_gello_seq_{0};
+  int consecutive_fresh_gello_samples_{0};
   static constexpr double kMaxJointStateAge = 0.5;
+  // Fresh messages (received after activation, in an unbroken stream) required before the
+  // motion generator is built. Gello publishes at 25 Hz, so 5 samples is ~0.2 s.
+  static constexpr int kRequiredFreshGelloSamples = 5;
 
   Vector7d calculateTauDGains_(const Vector7d& q_goal);
   bool validateGains_(const std::vector<double>& gains, const std::string& gains_name);
   bool initializeMotionGenerator_();
   void updateJointStates_();
-  void validateGelloPositions_(const sensor_msgs::msg::JointState& msg);
+  void readGelloSample_();
   void jointStateCallback_(const sensor_msgs::msg::JointState msg);
 };
 

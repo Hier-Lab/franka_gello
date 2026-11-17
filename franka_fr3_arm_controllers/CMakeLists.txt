@@ -33,6 +33,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(realtime_tools REQUIRED)
 
 add_library(
         ${PROJECT_NAME}
@@ -52,6 +53,7 @@ ament_target_dependencies(
         pluginlib
         rclcpp
         rclcpp_lifecycle
+        realtime_tools
         sensor_msgs
 )
 
@@ -88,6 +90,7 @@ ament_export_dependencies(
         rclcpp
         rclcpp_lifecycle
         hardware_interface
+        realtime_tools
         sensor_msgs
 )
 

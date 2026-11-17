@@ -52,12 +52,9 @@ controller_interface::return_type JointImpedanceController::update(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
   updateJointStates_();
-  // The subscription callback cannot notice a publisher that stopped publishing, so the
-  // staleness of the last received Gello state has to be re-checked every cycle.
-  if (gello_position_values_valid_ &&
-      (this->get_node()->now() - last_joint_state_time_).seconds() >= kMaxJointStateAge) {
-    gello_position_values_valid_ = false;
-  }
+  // Freshness is re-evaluated every cycle: the subscription callback cannot notice a publisher
+  // that stopped publishing.
+  readGelloSample_();
 
   Vector7d q_goal;
   Vector7d tau_d_calculated;
@@ -109,21 +106,63 @@ controller_interface::return_type JointImpedanceController::update(
 }
 
 void JointImpedanceController::jointStateCallback_(const sensor_msgs::msg::JointState msg) {
-  if (last_joint_state_time_.seconds() == 0.0) {
+  // Anything that arrives while the controller is not active is dropped, so a message from an
+  // earlier session can never become the start target of a later activation.
+  if (!accepting_gello_messages_.load()) {
     return;
   }
 
-  if (msg.position.size() < gello_position_values_.size()) {
+  GelloSample sample;
+  if (msg.position.size() < sample.positions.size()) {
     RCLCPP_WARN(get_node()->get_logger(),
                 "Received joint state size is smaller than expected size.");
     return;
   }
 
-  std::copy(msg.position.begin(), msg.position.begin() + gello_position_values_.size(),
-            gello_position_values_.begin());
+  std::copy(msg.position.begin(), msg.position.begin() + sample.positions.size(),
+            sample.positions.begin());
+  sample.stamp = rclcpp::Time(msg.header.stamp, RCL_ROS_TIME);
+  sample.receive_time = get_node()->now();
+  sample.seq = ++gello_rx_seq_;
+  gello_buffer_.writeFromNonRT(sample);
+}
 
-  validateGelloPositions_(msg);
-  last_joint_state_time_ = msg.header.stamp;
+void JointImpedanceController::readGelloSample_() {
+  const GelloSample& sample = *gello_buffer_.readFromRT();
+
+  if (sample.seq == 0) {
+    // Nothing received since activation.
+    gello_position_values_valid_ = false;
+    consecutive_fresh_gello_samples_ = 0;
+    return;
+  }
+
+  const auto now = get_node()->now();
+  const double receive_age = (now - sample.receive_time).seconds();
+  const double stamp_age = (now - sample.stamp).seconds();
+  const bool fresh = sample.receive_time >= activation_time_ && receive_age < kMaxJointStateAge &&
+                     stamp_age < kMaxJointStateAge && stamp_age > -kMaxJointStateAge;
+
+  if (!fresh) {
+    if (gello_position_values_valid_) {
+      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                           "Gello joint states are stale. Time since received: %f // Time since "
+                           "message stamp: %f",
+                           receive_age, stamp_age);
+    }
+    gello_position_values_valid_ = false;
+    consecutive_fresh_gello_samples_ = 0;
+    return;
+  }
+
+  if (sample.seq != last_seen_gello_seq_) {
+    last_seen_gello_seq_ = sample.seq;
+    if (consecutive_fresh_gello_samples_ < kRequiredFreshGelloSamples) {
+      ++consecutive_fresh_gello_samples_;
+    }
+  }
+  gello_position_values_ = sample.positions;
+  gello_position_values_valid_ = true;
 }
 
 CallbackReturn JointImpedanceController::on_init() {
@@ -183,6 +222,7 @@ CallbackReturn JointImpedanceController::on_configure(
     RCLCPP_ERROR(get_node()->get_logger(), "Failed to get robot_description parameter.");
   }
 
+  accepting_gello_messages_.store(false);
   joint_state_subscriber_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
       "gello/joint_states", 1,
       [this](const sensor_msgs::msg::JointState& msg) { jointStateCallback_(msg); });
@@ -192,13 +232,29 @@ CallbackReturn JointImpedanceController::on_configure(
 
 CallbackReturn JointImpedanceController::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
+  // Discard whatever was buffered by a previous activation before accepting new messages.
+  accepting_gello_messages_.store(false);
+  gello_buffer_.writeFromNonRT(GelloSample{});
+  activation_time_ = get_node()->now();
+  last_seen_gello_seq_ = 0;
+  consecutive_fresh_gello_samples_ = 0;
   gello_position_values_valid_ = false;
   motion_generator_initialized_ = false;
   move_to_start_position_finished_ = false;
-  last_joint_state_time_ = get_node()->now();
   dq_filtered_.setZero();
   start_time_ = this->get_node()->now();
+  accepting_gello_messages_.store(true);
 
+  RCLCPP_INFO(get_node()->get_logger(),
+              "Activated. Holding with zero torque until %s publishes fresh joint states.",
+              joint_state_subscriber_->get_topic_name());
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn JointImpedanceController::on_deactivate(
+    const rclcpp_lifecycle::State& /*previous_state*/) {
+  accepting_gello_messages_.store(false);
+  gello_buffer_.writeFromNonRT(GelloSample{});
   return CallbackReturn::SUCCESS;
 }
 
@@ -226,20 +282,6 @@ bool JointImpedanceController::validateGains_(const std::vector<double>& gains,
   return true;
 }
 
-void JointImpedanceController::validateGelloPositions_(const sensor_msgs::msg::JointState& msg) {
-  auto current_time = get_node()->now();
-  auto time_since_last_joint_state = (current_time - last_joint_state_time_).seconds();
-  auto time_since_msg_stamp = (current_time - msg.header.stamp).seconds();
-  gello_position_values_valid_ =
-      (time_since_last_joint_state < kMaxJointStateAge && time_since_msg_stamp < kMaxJointStateAge);
-  if (!gello_position_values_valid_) {
-    RCLCPP_WARN(get_node()->get_logger(),
-                "Gello position values are not valid. Time since last joint state: %f // Time "
-                "since message stamp: %f",
-                time_since_last_joint_state, time_since_msg_stamp);
-  }
-}
-
 void JointImpedanceController::updateJointStates_() {
   for (auto i = 0; i < num_joints; ++i) {
     const auto& position_interface = state_interfaces_.at(2 * i);
@@ -254,10 +296,14 @@ void JointImpedanceController::updateJointStates_() {
 }
 
 bool JointImpedanceController::initializeMotionGenerator_() {
-  if (!gello_position_values_valid_) {
+  // Only start once the topic has delivered an unbroken run of fresh messages after this
+  // activation; a single stray or old message is not enough.
+  if (!gello_position_values_valid_ ||
+      consecutive_fresh_gello_samples_ < kRequiredFreshGelloSamples) {
     // Only send a warning once every 10 seconds in order not to spam the log
     RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 10 * 1000,
-                         "Waiting for valid joint states...");
+                         "Waiting for fresh joint states on %s ...",
+                         joint_state_subscriber_->get_topic_name());
     return false;
   }
 
