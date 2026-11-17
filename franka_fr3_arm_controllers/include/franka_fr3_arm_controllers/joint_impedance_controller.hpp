@@ -58,6 +58,8 @@ class JointImpedanceController : public controller_interface::ControllerInterfac
   Vector7d d_gains_;
   double k_alpha_;
   bool move_to_start_position_finished_{false};
+  bool hold_position_initialized_{false};
+  Vector7d q_hold_;
   bool motion_generator_initialized_{false};
   rclcpp::Time start_time_;
   std::unique_ptr<MotionGenerator> motion_generator_;

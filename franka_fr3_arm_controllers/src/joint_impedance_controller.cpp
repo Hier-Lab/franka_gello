@@ -59,15 +59,21 @@ controller_interface::return_type JointImpedanceController::update(
   Vector7d q_goal;
   Vector7d tau_d_calculated;
 
+  if (!hold_position_initialized_) {
+    // Latch the measured configuration on the first cycle after activation.
+    q_hold_ = q_;
+    hold_position_initialized_ = true;
+  }
+
   if (!motion_generator_initialized_) {
-    // After starting the controller we wait for valid joint states from the input topic
-    // Until we get valid joint states we will send zero torques to the robot
-    // to allow the user to reposition the robot
+    // After starting the controller we wait for fresh joint states from the input topic.
+    // Until then we hold the configuration the robot had at activation.
     motion_generator_initialized_ = initializeMotionGenerator_();
 
     if (!motion_generator_initialized_) {
+      tau_d_calculated = calculateTauDGains_(q_hold_);
       for (int i = 0; i < num_joints; ++i) {
-        command_interfaces_[i].set_value(0.0);
+        command_interfaces_[i].set_value(tau_d_calculated(i));
       }
 
       return controller_interface::return_type::OK;
@@ -239,6 +245,7 @@ CallbackReturn JointImpedanceController::on_activate(
   last_seen_gello_seq_ = 0;
   consecutive_fresh_gello_samples_ = 0;
   gello_position_values_valid_ = false;
+  hold_position_initialized_ = false;
   motion_generator_initialized_ = false;
   move_to_start_position_finished_ = false;
   dq_filtered_.setZero();
@@ -246,7 +253,7 @@ CallbackReturn JointImpedanceController::on_activate(
   accepting_gello_messages_.store(true);
 
   RCLCPP_INFO(get_node()->get_logger(),
-              "Activated. Holding with zero torque until %s publishes fresh joint states.",
+              "Activated. Holding current position until %s publishes fresh joint states.",
               joint_state_subscriber_->get_topic_name());
   return CallbackReturn::SUCCESS;
 }
